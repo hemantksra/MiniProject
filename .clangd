@@ -1,0 +1,10 @@
+CompileFlags:
+  Compiler: C:\msys64\ucrt64\bin\gcc.exe
+  Add:
+    - "--target=x86_64-w64-mingw32"
+    - "-isystem"
+    - "C:/msys64/ucrt64/bin/../lib/gcc/x86_64-w64-mingw32/16.1.0/include"
+    - "-isystem"
+    - "C:/msys64/ucrt64/bin/../lib/gcc/x86_64-w64-mingw32/16.1.0/../../../../include"
+    - "-isystem"
+    - "C:/msys64/ucrt64/bin/../lib/gcc/x86_64-w64-mingw32/16.1.0/include-fixed"
