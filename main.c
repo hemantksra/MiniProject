@@ -3,6 +3,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef _WIN32
+typedef void* HANDLE;
+typedef unsigned long DWORD;
+#define STD_INPUT_HANDLE ((DWORD)-10)
+#define ENABLE_QUICK_EDIT_MODE 0x0040
+#define ENABLE_EXTENDED_FLAGS 0x0080
+#define ENABLE_MOUSE_INPUT 0x0010
+
+void* __stdcall GetStdHandle(DWORD nStdHandle);
+int __stdcall GetConsoleMode(void* hConsoleHandle, DWORD *lpMode);
+int __stdcall SetConsoleMode(void* hConsoleHandle, DWORD dwMode);
+#endif
+
 #define WIDTH 80
 #define HEIGHT 15
 #define MAX_SHAPES 100
@@ -19,6 +32,8 @@ typedef enum {
 typedef struct {
   int id;
   ShapeType type;
+  int color_pair;
+  bool is_filled;
   union {
     struct {
       int x1, y1, x2, y2;
@@ -38,7 +53,10 @@ typedef struct {
 Shape shapes[MAX_SHAPES];
 int shape_count = 0;
 int next_id = 1;
-char canvas[HEIGHT][WIDTH];
+chtype canvas[HEIGHT][WIDTH];
+int active_color = 1;
+bool active_fill = false;
+chtype current_render_chtype = 0;
 
 #define MAX_UNDO 50
 Shape undo_stack[MAX_UNDO][MAX_SHAPES];
@@ -55,9 +73,9 @@ void save_state() {
     undo_current++;
   } else {
     for (int i = 0; i < MAX_UNDO - 1; i++) {
-      undo_shape_counts[i] = undo_shape_counts[i+1];
+      undo_shape_counts[i] = undo_shape_counts[i + 1];
       for (int j = 0; j < undo_shape_counts[i]; j++) {
-        undo_stack[i][j] = undo_stack[i+1][j];
+        undo_stack[i][j] = undo_stack[i + 1][j];
       }
     }
   }
@@ -97,7 +115,8 @@ typedef enum {
   MODE_MENU_LIST,
   MODE_MENU_MODIFY,
   MODE_MENU_DELETE,
-  MODE_INTERACTIVE_PLACE
+  MODE_INTERACTIVE_PLACE,
+  MODE_INTERACTIVE_MODIFY
 } EditorMode;
 
 EditorMode current_mode = MODE_MENU_MAIN;
@@ -117,7 +136,7 @@ bool blink_state = true;
 void clear_canvas() {
   for (int i = 0; i < HEIGHT; i++) {
     for (int j = 0; j < WIDTH; j++) {
-      canvas[i][j] = BG_CHAR;
+      canvas[i][j] = BG_CHAR | COLOR_PAIR(1);
     }
   }
 }
@@ -137,11 +156,11 @@ int render_direct_attr = 0;
 void draw_pixel(int x, int y) {
   if (x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT) {
     if (render_direct_mode) {
-      attron(render_direct_attr);
+      attron(render_direct_attr | current_render_chtype);
       mvaddch(y, x, FG_CHAR);
-      attroff(render_direct_attr);
+      attroff(render_direct_attr | current_render_chtype);
     } else {
-      canvas[y][x] = FG_CHAR;
+      canvas[y][x] = FG_CHAR | current_render_chtype;
     }
   }
 }
@@ -233,6 +252,50 @@ void draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3) {
   draw_line(x3, y3, x1, y1);
 }
 
+void draw_filled_rect(int x, int y, int w, int h) {
+  for (int i = 0; i <= h; i++) {
+    draw_line(x, y + i, x + w, y + i);
+  }
+}
+
+void draw_filled_circle(int cx, int cy, int radius) {
+  for (int y = -radius; y <= radius; y++) {
+    int dx = 0;
+    while ((dx + 1) * (dx + 1) + y * y <= radius * radius) {
+      dx++;
+    }
+    draw_line(cx - dx, cy + y, cx + dx, cy + y);
+  }
+}
+
+int point_in_triangle(int px, int py, int x1, int y1, int x2, int y2, int x3,
+                      int y3) {
+  int denominator = ((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3));
+  if (denominator == 0)
+    return 0;
+  float a =
+      ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)) / (float)denominator;
+  float b =
+      ((y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)) / (float)denominator;
+  float c = 1.0f - a - b;
+  return a >= 0 && a <= 1 && b >= 0 && b <= 1 && c >= 0 && c <= 1;
+}
+
+void draw_filled_triangle(int x1, int y1, int x2, int y2, int x3, int y3) {
+  int min_x = x1 < x2 ? (x1 < x3 ? x1 : x3) : (x2 < x3 ? x2 : x3);
+  int max_x = x1 > x2 ? (x1 > x3 ? x1 : x3) : (x2 > x3 ? x2 : x3);
+  int min_y = y1 < y2 ? (y1 < y3 ? y1 : y3) : (y2 < y3 ? y2 : y3);
+  int max_y = y1 > y2 ? (y1 > y3 ? y1 : y3) : (y2 > y3 ? y2 : y3);
+
+  for (int y = min_y; y <= max_y; y++) {
+    for (int x = min_x; x <= max_x; x++) {
+      if (point_in_triangle(x, y, x1, y1, x2, y2, x3, y3)) {
+        draw_pixel(x, y);
+      }
+    }
+  }
+}
+
 void render_single_shape(Shape *s) {
   Shape t = *s;
 
@@ -259,22 +322,37 @@ void render_single_shape(Shape *s) {
     t.data.triangle.y3 = (int)((t.data.triangle.y3 - pan_y) * zoom);
   }
 
+  current_render_chtype = COLOR_PAIR(t.color_pair);
+
   switch (t.type) {
   case SHAPE_LINE:
-    draw_line(t.data.line.x1, t.data.line.y1, t.data.line.x2,
-              t.data.line.y2);
+    draw_line(t.data.line.x1, t.data.line.y1, t.data.line.x2, t.data.line.y2);
     break;
   case SHAPE_RECTANGLE:
-    draw_rect(t.data.rect.x, t.data.rect.y, t.data.rect.width,
-              t.data.rect.height);
+    if (t.is_filled) {
+      draw_filled_rect(t.data.rect.x, t.data.rect.y, t.data.rect.width,
+                       t.data.rect.height);
+    } else {
+      draw_rect(t.data.rect.x, t.data.rect.y, t.data.rect.width,
+                t.data.rect.height);
+    }
     break;
   case SHAPE_CIRCLE:
-    draw_circle(t.data.circle.cx, t.data.circle.cy, t.data.circle.r);
+    if (t.is_filled) {
+      draw_filled_circle(t.data.circle.cx, t.data.circle.cy, t.data.circle.r);
+    } else {
+      draw_circle(t.data.circle.cx, t.data.circle.cy, t.data.circle.r);
+    }
     break;
   case SHAPE_TRIANGLE:
-    draw_triangle(t.data.triangle.x1, t.data.triangle.y1, t.data.triangle.x2,
-                  t.data.triangle.y2, t.data.triangle.x3,
-                  t.data.triangle.y3);
+    if (t.is_filled) {
+      draw_filled_triangle(t.data.triangle.x1, t.data.triangle.y1,
+                           t.data.triangle.x2, t.data.triangle.y2,
+                           t.data.triangle.x3, t.data.triangle.y3);
+    } else {
+      draw_triangle(t.data.triangle.x1, t.data.triangle.y1, t.data.triangle.x2,
+                    t.data.triangle.y2, t.data.triangle.x3, t.data.triangle.y3);
+    }
     break;
   }
 }
@@ -282,7 +360,8 @@ void render_single_shape(Shape *s) {
 void render_shapes() {
   clear_canvas();
   for (int i = 0; i < shape_count; i++) {
-    if ((current_mode == MODE_MENU_DELETE || current_mode == MODE_MENU_MODIFY) &&
+    if ((current_mode == MODE_MENU_DELETE ||
+         current_mode == MODE_MENU_MODIFY) &&
         i == menu_selection && !blink_state) {
       continue;
     }
@@ -293,6 +372,8 @@ void render_shapes() {
   if (current_mode == MODE_INTERACTIVE_PLACE && place_points_collected > 0) {
     Shape preview;
     preview.type = place_shape_type;
+    preview.color_pair = active_color;
+    preview.is_filled = active_fill;
     bool valid = false;
 
     if (place_shape_type == SHAPE_LINE && place_points_collected == 1) {
@@ -379,8 +460,10 @@ void draw_ui() {
   attroff(COLOR_PAIR(1));
 
   attron(COLOR_PAIR(3) | A_BOLD);
-  mvprintw(HEIGHT, 2, "[ Zoom: %.1fx | Pan: %d,%d ]", zoom, pan_x, pan_y);
-  
+  mvprintw(HEIGHT, 2, "[ Zoom: %.1fx | Pan: %d,%d ] [ Color: %d | Fill: %s ]",
+           zoom, pan_x, pan_y, active_color, active_fill ? "ON" : "OFF");
+  attroff(COLOR_PAIR(3) | A_BOLD);
+
   if (current_mode == MODE_MENU_MAIN) {
     mvprintw(HEIGHT + 1, 2, "=== Main Menu ===");
     attroff(COLOR_PAIR(3) | A_BOLD);
@@ -410,6 +493,11 @@ void draw_ui() {
     attron(A_REVERSE);
     mvaddch(cursor_y, cursor_x, ch == ' ' ? '+' : ch);
     attroff(A_REVERSE);
+  } else if (current_mode == MODE_INTERACTIVE_MODIFY) {
+    mvprintw(HEIGHT + 1, 2, "=== Modifying Shape ===");
+    attroff(COLOR_PAIR(3) | A_BOLD);
+    mvprintw(HEIGHT + 2, 2, "Arrows: Move | +/-: Resize | C: Color | F: Fill");
+    mvprintw(HEIGHT + 3, 2, "Press ENTER to confirm. ESC to cancel.");
   } else if (current_mode == MODE_MENU_LIST ||
              current_mode == MODE_MENU_DELETE ||
              current_mode == MODE_MENU_MODIFY) {
@@ -489,6 +577,9 @@ void finalize_placement() {
     new_shape.data.triangle.y3 = place_py[2];
   }
 
+  new_shape.color_pair = active_color;
+  new_shape.is_filled = active_fill;
+
   if (shape_count < MAX_SHAPES) {
     save_state();
     shapes[shape_count++] = new_shape;
@@ -498,8 +589,69 @@ void finalize_placement() {
   menu_selection = 0;
 }
 
+void translate_shape(Shape *s, int dx, int dy) {
+  if (s->type == SHAPE_LINE) {
+    s->data.line.x1 += dx;
+    s->data.line.x2 += dx;
+    s->data.line.y1 += dy;
+    s->data.line.y2 += dy;
+  } else if (s->type == SHAPE_RECTANGLE) {
+    s->data.rect.x += dx;
+    s->data.rect.y += dy;
+  } else if (s->type == SHAPE_CIRCLE) {
+    s->data.circle.cx += dx;
+    s->data.circle.cy += dy;
+  } else if (s->type == SHAPE_TRIANGLE) {
+    s->data.triangle.x1 += dx;
+    s->data.triangle.x2 += dx;
+    s->data.triangle.x3 += dx;
+    s->data.triangle.y1 += dy;
+    s->data.triangle.y2 += dy;
+    s->data.triangle.y3 += dy;
+  }
+}
+
+void scale_shape(Shape *s, int delta) {
+  if (s->type == SHAPE_LINE) {
+    int dx = s->data.line.x2 - s->data.line.x1;
+    int dy = s->data.line.y2 - s->data.line.y1;
+    if (dx == 0 && dy == 0) return;
+    if (dx > 0) s->data.line.x2 += delta; else if (dx < 0) s->data.line.x2 -= delta;
+    if (dy > 0) s->data.line.y2 += delta; else if (dy < 0) s->data.line.y2 -= delta;
+  } else if (s->type == SHAPE_RECTANGLE) {
+    s->data.rect.width += delta;
+    s->data.rect.height += delta;
+    if (s->data.rect.width < 1) s->data.rect.width = 1;
+    if (s->data.rect.height < 1) s->data.rect.height = 1;
+  } else if (s->type == SHAPE_CIRCLE) {
+    s->data.circle.r += delta;
+    if (s->data.circle.r < 1) s->data.circle.r = 1;
+  } else if (s->type == SHAPE_TRIANGLE) {
+    int cx = (s->data.triangle.x1 + s->data.triangle.x2 + s->data.triangle.x3) / 3;
+    int cy = (s->data.triangle.y1 + s->data.triangle.y2 + s->data.triangle.y3) / 3;
+    if (s->data.triangle.x1 > cx) s->data.triangle.x1 += delta; else if (s->data.triangle.x1 < cx) s->data.triangle.x1 -= delta;
+    if (s->data.triangle.y1 > cy) s->data.triangle.y1 += delta; else if (s->data.triangle.y1 < cy) s->data.triangle.y1 -= delta;
+    if (s->data.triangle.x2 > cx) s->data.triangle.x2 += delta; else if (s->data.triangle.x2 < cx) s->data.triangle.x2 -= delta;
+    if (s->data.triangle.y2 > cy) s->data.triangle.y2 += delta; else if (s->data.triangle.y2 < cy) s->data.triangle.y2 -= delta;
+    if (s->data.triangle.x3 > cx) s->data.triangle.x3 += delta; else if (s->data.triangle.x3 < cx) s->data.triangle.x3 -= delta;
+    if (s->data.triangle.y3 > cy) s->data.triangle.y3 += delta; else if (s->data.triangle.y3 < cy) s->data.triangle.y3 -= delta;
+  }
+}
+
 int main() {
+#ifdef _WIN32
+  HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode;
+  if (GetConsoleMode(hStdin, &mode)) {
+    mode &= ~ENABLE_QUICK_EDIT_MODE;
+    mode |= ENABLE_MOUSE_INPUT;
+    SetConsoleMode(hStdin, mode | ENABLE_EXTENDED_FLAGS);
+  }
+#endif
+
   initscr();
+  printf("\033[?1003h\033[?1015h\033[?1006h");
+  fflush(stdout);
   cbreak();
   noecho();
   keypad(stdscr, TRUE);
@@ -508,10 +660,16 @@ int main() {
 
   if (has_colors()) {
     start_color();
-    init_pair(1, COLOR_CYAN, COLOR_BLACK);
-    init_pair(2, COLOR_GREEN, COLOR_BLACK);
-    init_pair(3, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(1, COLOR_WHITE, COLOR_BLACK);
+    init_pair(2, COLOR_RED, COLOR_BLACK);
+    init_pair(3, COLOR_GREEN, COLOR_BLACK);
+    init_pair(4, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(5, COLOR_BLUE, COLOR_BLACK);
+    init_pair(6, COLOR_MAGENTA, COLOR_BLACK);
+    init_pair(7, COLOR_CYAN, COLOR_BLACK);
   }
+
+  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
 
   save_state();
 
@@ -545,17 +703,51 @@ int main() {
       blink_counter = 0;
     }
 
+    if (ch == KEY_MOUSE) {
+      MEVENT ev;
+      if (getmouse(&ev) == OK) {
+        bool just_clicked = (ev.bstate & BUTTON1_CLICKED) != 0;
+
+        if (ev.y < HEIGHT && ev.x < WIDTH) {
+          cursor_x = ev.x;
+          cursor_y = ev.y;
+          if (just_clicked) { 
+            ch = '\n';     // Simulate enter key for placement
+          }
+        } else if (ev.y >= HEIGHT + 2 && ev.y < HEIGHT + 2 + 5) {
+          int hover_idx = ev.y - (HEIGHT + 2);
+          if (current_mode == MODE_MENU_MAIN || current_mode == MODE_MENU_ADD) {
+            menu_selection = hover_idx;
+            if (just_clicked) ch = '\n';
+          } else if (current_mode == MODE_MENU_LIST || current_mode == MODE_MENU_DELETE || current_mode == MODE_MENU_MODIFY) {
+            int actual_idx = menu_scroll + hover_idx;
+            if (actual_idx < shape_count) {
+              menu_selection = actual_idx;
+              if (just_clicked) ch = '\n';
+            }
+          }
+        }
+      }
+    }
+    
     if (ch == 'u' || ch == 'U') {
       do_undo();
       continue;
     } else if (ch == 'r' || ch == 'R') {
       do_redo();
       continue;
-    } else if (ch == '=' || ch == '+') {
+    } else if ((ch == 'c' || ch == 'C') && current_mode != MODE_INTERACTIVE_MODIFY) {
+      active_color = (active_color % 7) + 1;
+      continue;
+    } else if ((ch == 'f' || ch == 'F') && current_mode != MODE_INTERACTIVE_MODIFY) {
+      active_fill = !active_fill;
+      continue;
+    } else if ((ch == '=' || ch == '+') && current_mode != MODE_INTERACTIVE_MODIFY) {
       zoom += 0.2f;
       continue;
-    } else if (ch == '-') {
-      if (zoom > 0.3f) zoom -= 0.2f;
+    } else if (ch == '-' && current_mode != MODE_INTERACTIVE_MODIFY) {
+      if (zoom > 0.3f)
+        zoom -= 0.2f;
       continue;
     } else if (ch == 'w' || ch == 'W') {
       pan_y--;
@@ -634,6 +826,42 @@ int main() {
           finalize_placement();
         }
       }
+    } else if (current_mode == MODE_INTERACTIVE_MODIFY) {
+      int dx = 0, dy = 0;
+      int scale_delta = 0;
+      if (ch == KEY_UP)
+        dy = -1;
+      else if (ch == KEY_DOWN)
+        dy = 1;
+      else if (ch == KEY_LEFT)
+        dx = -1;
+      else if (ch == KEY_RIGHT)
+        dx = 1;
+      else if (ch == '+' || ch == '=')
+        scale_delta = 1;
+      else if (ch == '-' || ch == '_')
+        scale_delta = -1;
+      else if (ch == 'c' || ch == 'C') {
+        shapes[menu_selection].color_pair++;
+        if (shapes[menu_selection].color_pair > 7) shapes[menu_selection].color_pair = 1;
+      } else if (ch == 'f' || ch == 'F') {
+        shapes[menu_selection].is_filled = !shapes[menu_selection].is_filled;
+      }
+      else if (ch == 27) { // ESC
+        do_undo();
+        current_mode = MODE_MENU_MAIN;
+        menu_selection = 0;
+      } else if (ch == '\n' || ch == KEY_ENTER) {
+        current_mode = MODE_MENU_MAIN;
+        menu_selection = 0;
+      }
+
+      if (dx != 0 || dy != 0) {
+        translate_shape(&shapes[menu_selection], dx, dy);
+      }
+      if (scale_delta != 0) {
+        scale_shape(&shapes[menu_selection], scale_delta);
+      }
     } else if (current_mode == MODE_MENU_LIST ||
                current_mode == MODE_MENU_DELETE ||
                current_mode == MODE_MENU_MODIFY) {
@@ -668,20 +896,8 @@ int main() {
           current_mode = MODE_MENU_MAIN;
           menu_selection = 0;
         } else if (current_mode == MODE_MENU_MODIFY) {
-          // Start modify interaction: effectively replace the shape.
-          // Simplest approach: Delete it, and start placing a new one of same
-          // type
           save_state();
-          ShapeType t = shapes[menu_selection].type;
-          for (int i = menu_selection; i < shape_count - 1; i++) {
-            shapes[i] = shapes[i + 1];
-          }
-          shape_count--;
-          place_shape_type = t;
-          place_points_collected = 0;
-          current_mode = MODE_INTERACTIVE_PLACE;
-          cursor_x = WIDTH / 2;
-          cursor_y = HEIGHT / 2;
+          current_mode = MODE_INTERACTIVE_MODIFY;
         }
       }
     }
