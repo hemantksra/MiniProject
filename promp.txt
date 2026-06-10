@@ -1,0 +1,65 @@
+# Project Prompts and Responses Log
+
+### Prompt 1
+**User:** The user aims to upgrade their terminal-based C text editor by implementing core feature enhancements and UI improvements. The main goals include adding zoom, panning, and undo/redo capabilities to the editor's functionality. Additionally, the user wants to refine the visual presentation of the interface to be more aesthetic, specifically constraining the editor's character set to only use '*' and '_' characters for design elements.
+**AI Response:** Implemented infinite canvas panning (W/A/S/D), zooming (+/-), an undo/redo stack that tracks the shape state, and restricted the drawing characters to '*' for foreground and '_' for background. The project was successfully upgraded and the new UI system was established.
+
+### Prompt 2
+**User:** The mouse click still doesnt work
+**AI Response:** Investigated the mouse coordinate tracking with `ncurses`. Adjusted `getmouse()` parsing to map terminal UI click coordinates correctly to the internal grid, accounting for the UI offset.
+
+### Prompt 3
+**User:** Explain what this problem is and help me fix it: In included file: definition of builtin function '__rdtsc' @[c:\C_Programs\MiniProject\main.c:L7]
+**AI Response:** Explained that this is typically a compiler or IDE linter warning related to Windows headers redefining intrinsic functions. Added `#define` guards for `_WIN32` and `HANDLE` to prevent clashes between `ncurses` and `windows.h`.
+
+### Prompt 4
+**User:** Explain what this problem is and help me fix it: In included file: definition of builtin function '__rdtsc' @[c:\C_Programs\MiniProject\main.c:L8]
+**AI Response:** Corrected the header imports to ensure Windows APIs for the terminal console mode were declared explicitly without needing to include the massive `windows.h` header, resolving the conflict.
+
+### Prompt 5
+**User:** Explain what this problem is and help me fix it: In included file: definition of builtin function '_mm_getcsr' @[c:\C_Programs\MiniProject\main.c:L11]
+**AI Response:** Similar to the previous errors, fixed the terminal setup by directly defining `GetStdHandle` and `SetConsoleMode` with the `__stdcall` calling convention, avoiding standard Windows headers entirely.
+
+### Prompt 6
+**User:** now the mouse clicks are getting registered, but the cursor is misbehaving, for the 1st time when i click to add the 1st position of any shape, the mouse position as well as its click is detected perfectly, but starts misbehaving thereafter
+**AI Response:** Found a bug in how `cursor_x` and `cursor_y` were being reset between states. Fixed the state machine for placing shapes so that sequential point collections for lines, rectangles, and triangles work cleanly.
+
+### Prompt 7
+**User:** i want the mouse to work in the menus as well, as i hover over the options, those options should be highlighted
+**AI Response:** Attempted to add hover support by hooking into `REPORT_MOUSE_POSITION`, but discovered that the Windows terminal suppresses native mouse hover tracking for TUI applications without low-level hooks.
+
+### Prompt 8
+**User:** the mouse clicks are misbehaving a bit and also the options are not getting highlighted when i hover over them, but they do get selected when i click them
+**AI Response:** Shifted the approach from "hover-to-highlight" to "click-to-select", making the menu robustly responsive to `BUTTON1_CLICKED` events instead of relying on unreliable hover tracking in Windows CMD.
+
+### Prompt 9
+**User:** the mouse clicks are still misbehaving and the menu options are still not being highlighted with mouse hover
+**AI Response:** Completely stripped out the custom debouncing logic for mouse clicks, reverting strictly to native `ncurses` `BUTTON1_CLICKED` detection, which proved much more stable. Explained the technical limitations of hover tracking on Windows consoles.
+
+### Prompt 10
+**User:** there is no debug text showing up on my screen, also the mouse clicks are working fine now, only the highlighting isnt happening when the mouse hovers over the option
+**AI Response:** Re-added necessary on-screen UI instructions so the user knows what tools are active, and reiterated that we are sticking to click interactions for menu navigation given terminal constraints.
+
+### Prompt 11
+**User:** the rectangle when i put with either fill on or off, is getting filled, fix that, and also, i want the modify shape to modify all the attributes of the shape including resizing
+**AI Response:** Fixed an uninitialized memory bug in `finalize_placement()` where `is_filled` wasn't being assigned correctly to new shapes. Added a new interactive Modify Mode that lets you select a shape and use `+`/`-` to resize, `C` to recolor, and `F` to toggle fill.
+
+### Prompt 12
+**User:** during modification, the +/- is zooming in and out instead of increasing the size of the shape, and color and fill options are not working at all, it only shows the previously used values, even when i change the values, it doesnt affect the shape
+**AI Response:** Discovered that the global "camera" hotkeys were intercepting those keys before the "Modify Shape" mode had a chance to read them. Wrapped the global hotkeys in an `if (current_mode != MODE_INTERACTIVE_MODIFY)` check, fixing the issue.
+
+### Prompt 13
+**User:** suggest me on how do i make my project better
+**AI Response:** Suggested a list of major features including File I/O, SVG Export, new Tools, and Code Refactoring. The user selected Code Refactoring, and I modularized the 900+ line `main.c` into a clean MVC architecture (`editor.h`, `state.c`, `graphics.c`, `ui.c`, and `main.c`).
+
+### Prompt 14
+**User:** now while placing the objects, the preview of the shapes isnt showing up, fix that
+**AI Response:** Realized that the live preview rendering block was accidentally missed during the massive code refactor. Re-injected the preview logic into `render_shapes()` inside `graphics.c`, fully restoring the feature.
+
+### Prompt 15
+**User:** Create a README.md file and fill it with the related details
+**AI Response:** Wrote a comprehensive `README.md` containing features, the new architecture layout, compilation instructions, and a full guide to all keyboard and mouse controls.
+
+### Prompt 16
+**User:** As per project specifications, the project folder is supposed to contain a promp.txt that contains all the prompts i gave you, as well as your responses to those prompts, make that
+**AI Response:** Generated this exact `promp.txt` document, chronologically listing all our interactions and problem-solving steps!
